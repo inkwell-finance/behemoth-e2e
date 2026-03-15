@@ -1,0 +1,198 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Check out behemoth-composer
+        uses: actions/checkout@v4
+        with:
+          repository: gigabraingg/behemoth-composer
+          path: behemoth-composer
+
+      - name: Check out behemoth-trader
+        uses: actions/checkout@v4
+        with:
+          repository: gigabraingg/behemoth-trader
+          path: behemoth-trader
+
+      - name: Check out behemoth-coordinator
+        uses: actions/checkout@v4
+        with:
+          repository: gigabraingg/behemoth-coordinator
+          path: behemoth-coordinator
+
+      - name: Check out behemoth-researcher
+        uses: actions/checkout@v4
+        with:
+          repository: gigabraingg/behemoth-researcher
+          path: behemoth-researcher
+
+      - name: Set up services environment
+        run: |
+          export BEHEMOTH_TRADER_PATH=${{ github.workspace }}/behemoth-trader
+          export BEHEMOTH_COORDINATOR_PATH=${{ github.workspace }}/behemoth-coordinator
+          export BEHEMOTH_RESEARCHER_PATH=${{ github.workspace }}/behemoth-researcher
+          export BEHEMOTH_E2E_PATH=${{ github.workspace }}
+          echo "BEHEMOTH_TRADER_PATH=$BEHEMOTH_TRADER_PATH" >> $GITHUB_ENV
+          echo "BEHEMOTH_COORDINATOR_PATH=$BEHEMOTH_COORDINATOR_PATH" >> $GITHUB_ENV
+          echo "BEHEMOTH_RESEARCHER_PATH=$BEHEMOTH_RESEARCHER_PATH" >> $GITHUB_ENV
+          echo "BEHEMOTH_E2E_PATH=$BEHEMOTH_E2E_PATH" >> $GITHUB_ENV
+
+      - name: Start services with Docker Compose
+        working-directory: behemoth-composer
+        run: |
+          docker-compose up -d \
+            timescaledb \
+            redis \
+            nats \
+            hypaper \
+            trader \
+            coordinator \
+            researcher
+
+      - name: Wait for TimescaleDB health check
+        run: |
+          for i in {1..30}; do
+            if curl -f http://localhost:5433 2>/dev/null || pg_isready -h localhost -p 5433 -U trading; then
+              echo "TimescaleDB is healthy"
+              exit 0
+            fi
+            echo "Waiting for TimescaleDB... (attempt $i/30)"
+            sleep 2
+          done
+          echo "TimescaleDB health check failed"
+          exit 1
+
+      - name: Wait for Redis health check
+        run: |
+          for i in {1..30}; do
+            if redis-cli -h localhost -p 6379 ping 2>/dev/null | grep -q PONG; then
+              echo "Redis is healthy"
+              exit 0
+            fi
+            echo "Waiting for Redis... (attempt $i/30)"
+            sleep 2
+          done
+          echo "Redis health check failed"
+          exit 1
+
+      - name: Wait for NATS health check
+        run: |
+          for i in {1..30}; do
+            if curl -f http://localhost:8222/healthz 2>/dev/null; then
+              echo "NATS is healthy"
+              exit 0
+            fi
+            echo "Waiting for NATS... (attempt $i/30)"
+            sleep 2
+          done
+          echo "NATS health check failed"
+          exit 1
+
+      - name: Wait for HyPaper health check
+        run: |
+          for i in {1..30}; do
+            if curl -f http://localhost:3001/info 2>/dev/null; then
+              echo "HyPaper is healthy"
+              exit 0
+            fi
+            echo "Waiting for HyPaper... (attempt $i/30)"
+            sleep 2
+          done
+          echo "HyPaper health check failed"
+          exit 1
+
+      - name: Wait for Trader health check
+        run: |
+          for i in {1..30}; do
+            if curl -f http://localhost:8090/health 2>/dev/null; then
+              echo "Trader is healthy"
+              exit 0
+            fi
+            echo "Waiting for Trader... (attempt $i/30)"
+            sleep 2
+          done
+          echo "Trader health check failed"
+          exit 1
+
+      - name: Wait for Coordinator health check
+        run: |
+          for i in {1..30}; do
+            if curl -f http://localhost:8081/health 2>/dev/null; then
+              echo "Coordinator is healthy"
+              exit 0
+            fi
+            echo "Waiting for Coordinator... (attempt $i/30)"
+            sleep 2
+          done
+          echo "Coordinator health check failed"
+          exit 1
+
+      - name: Wait for Researcher health check
+        run: |
+          for i in {1..30}; do
+            if curl -f http://localhost:8092/health 2>/dev/null; then
+              echo "Researcher is healthy"
+              exit 0
+            fi
+            echo "Waiting for Researcher... (attempt $i/30)"
+            sleep 2
+          done
+          echo "Researcher health check failed"
+          exit 1
+
+      - name: Install dependencies
+        run: |
+          bun install
+
+      - name: Run E2E tests
+        env:
+          TRADER_URL: http://localhost:8090
+          COORDINATOR_URL: http://localhost:8081
+          RESEARCHER_URL: http://localhost:8092
+        run: |
+          bun test --timeout 120000
+
+      - name: Collect Docker logs on failure
+        if: failure()
+        run: |
+          mkdir -p docker-logs
+          docker-compose -f behemoth-composer/docker-compose.yml logs > docker-logs/all-services.log 2>&1 || true
+          docker-compose -f behemoth-composer/docker-compose.yml logs timescaledb > docker-logs/timescaledb.log 2>&1 || true
+          docker-compose -f behemoth-composer/docker-compose.yml logs redis > docker-logs/redis.log 2>&1 || true
+          docker-compose -f behemoth-composer/docker-compose.yml logs nats > docker-logs/nats.log 2>&1 || true
+          docker-compose -f behemoth-composer/docker-compose.yml logs hypaper > docker-logs/hypaper.log 2>&1 || true
+          docker-compose -f behemoth-composer/docker-compose.yml logs trader > docker-logs/trader.log 2>&1 || true
+          docker-compose -f behemoth-composer/docker-compose.yml logs coordinator > docker-logs/coordinator.log 2>&1 || true
+          docker-compose -f behemoth-composer/docker-compose.yml logs researcher > docker-logs/researcher.log 2>&1 || true
+
+      - name: Upload Docker logs as artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-logs
+          path: docker-logs/
+          retention-days: 7
+
+      - name: Clean up services
+        if: always()
+        working-directory: behemoth-composer
+        run: |
+          docker-compose down --volumes || true
